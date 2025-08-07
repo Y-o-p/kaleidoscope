@@ -6,6 +6,26 @@
 #include <vector>
 #include <iostream>
 
+#include "llvm/ADT/APFloat.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/IR/BasicBlock.h"
+#include "llvm/IR/Constants.h"
+#include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/Function.h"
+#include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/Module.h"
+#include "llvm/IR/Type.h"
+#include "llvm/IR/Verifier.h"
+
+// LLVM specific globals
+static std::unique_ptr<llvm::LLVMContext> TheContext;
+static std::unique_ptr<llvm::IRBuilder<>> Builder;
+static std::unique_ptr<llvm::Module> TheModule;
+static std::map<std::string, llvm::Value *> NamedValues;
+
+
+// Lexer
 enum Token {
   tok_eof = -1,
   tok_def = -2,
@@ -124,6 +144,28 @@ struct FunctionAST {
 };
 
 using MaybeFunction = std::expected<FunctionAST, std::string>;
+
+///////////////////////////////////////////////////////////////////////////////
+/// LLVM code generation
+///////////////////////////////////////////////////////////////////////////////
+
+static void GenerateCode(const Expression& AnyExpression) {
+  std::visit([](auto&& Expr) {
+    using T = std::decay_t<decltype(Expr)>;
+    if constexpr (std::is_same_v<T, Number>) {
+      std::cout << "It's a Number: " << Expr << std::endl;
+    }
+    else if constexpr (std::is_same_v<T, Variable>) {
+      std::cout << "It's a Variable: " << Expr << std::endl;
+    }
+    else if constexpr (std::is_same_v<T, BinaryExpression*>) {
+      std::cout << "It's a BinaryExpression: " << Expr->Op << std::endl;
+    }
+    else if constexpr (std::is_same_v<T, CallExpression*>) {
+      std::cout << "It's a CallExpression: " << Expr->Callee << std::endl;
+    }
+  }, AnyExpression);
+}
 
 ///////////////////////////////////////////////////////////////////////////////
 /// PARSERS
