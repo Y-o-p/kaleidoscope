@@ -149,23 +149,124 @@ using MaybeFunction = std::expected<FunctionAST, std::string>;
 /// LLVM code generation
 ///////////////////////////////////////////////////////////////////////////////
 
-static void GenerateCode(const Expression& AnyExpression) {
-  std::visit([](auto&& Expr) {
+using MaybeValue = std::expected<llvm::Value*, std::string>;
+static MaybeValue GenerateCode(const Expression& AnyExpression) {
+  auto result = std::visit([](auto&& Expr) -> MaybeValue {
     using T = std::decay_t<decltype(Expr)>;
     if constexpr (std::is_same_v<T, Number>) {
-      std::cout << "It's a Number: " << Expr << std::endl;
+      return llvm::ConstantFP::get(*TheContext, llvm::APFloat(Expr));
     }
     else if constexpr (std::is_same_v<T, Variable>) {
-      std::cout << "It's a Variable: " << Expr << std::endl;
+      llvm::Value* V = NamedValues[Expr];
+      if (!V) {
+        return std::unexpected("Unknown variable name.");
+      }
+      return V;
     }
     else if constexpr (std::is_same_v<T, BinaryExpression*>) {
-      std::cout << "It's a BinaryExpression: " << Expr->Op << std::endl;
+      MaybeValue GeneratedL = GenerateCode(Expr->LHS);
+      MaybeValue GeneratedR = GenerateCode(Expr->RHS);
+      if (!GeneratedL) {
+        return GeneratedL;
+      }
+      if (!GeneratedR) {
+        return GeneratedR;
+      }
+      auto L = GeneratedL.value();
+      auto R = GeneratedR.value();
+
+      switch (Expr->Op) {
+        case '+':
+          return Builder->CreateFAdd(L, R, "addtmp");
+        case '-':
+          return Builder->CreateFSub(L, R, "subtmp");
+        case '*':
+          return Builder->CreateFMul(L, R, "multmp");
+        case '<':
+          L = Builder->CreateFCmpULT(L, R, "cmptmp");
+          return Builder->CreateUIToFP(L, llvm::Type::getDoubleTy(*TheContext), "booltmp");
+        default:
+          return std::unexpected("Invalid binary operator.");
+      }
     }
     else if constexpr (std::is_same_v<T, CallExpression*>) {
-      std::cout << "It's a CallExpression: " << Expr->Callee << std::endl;
+      llvm::Function* CalleeF = TheModule->getFunction(Expr->Callee);
+      if (!CalleeF) {
+        return std::unexpected("Unknown function referenced.");
+      }
+
+      if (CalleeF->arg_size() != Expr->Args.size()) {
+        return std::unexpected("Incorrect # of arguments passed.");
+      }
+
+      std::vector<llvm::Value*> ArgsV;
+      for (unsigned i = 0, e = Expr->Args.size(); i != e; ++i) {
+        MaybeValue V = GenerateCode(Expr->Args[i]);
+        if (!V) {
+          return V;
+        }
+        ArgsV.push_back(V.value());
+      }
+
+      return Builder->CreateCall(CalleeF, ArgsV, "calltmp");
     }
   }, AnyExpression);
+  if (result) {
+    result.value()->print(llvm::errs());
+  }
+  return result;
 }
+
+using MaybeLLVMFunction = std::expected<llvm::Function*, std::string>;
+llvm::Function* GenerateCode(const PrototypeAST& Proto) {
+  std::vector<llvm::Type*> Doubles(Proto.Args.size(), llvm::Type::getDoubleTy(*TheContext));
+  llvm::FunctionType* FT = llvm::FunctionType::get(llvm::Type::getDoubleTy(*TheContext), Doubles, false);
+  llvm::Function* F = llvm::Function::Create(FT, llvm::Function::ExternalLinkage, Proto.Name, TheModule.get());
+
+  unsigned Idx = 0;
+  for (auto& Arg : F->args()) {
+    Arg.setName(Proto.Args[Idx++]);
+  }
+  F->print(llvm::errs());
+  return F;
+}
+
+
+MaybeLLVMFunction GenerateCode(const FunctionAST& Func) {
+  llvm::Function* TheFunction = TheModule->getFunction(Func.Proto.Name);
+
+  if (!TheFunction) {
+    TheFunction = GenerateCode(Func.Proto);
+  }
+
+  if (!TheFunction) {
+    return std::unexpected("Couldn't generate the code for the prototype.");
+  }
+
+  if (!TheFunction->empty()) {
+    return std::unexpected("Function can't be redefined.");
+  }
+
+  llvm::BasicBlock* BB = llvm::BasicBlock::Create(*TheContext, "entry", TheFunction);
+  Builder->SetInsertPoint(BB);
+
+  NamedValues.clear();
+  for (auto& Arg : TheFunction->args()) {
+    NamedValues[std::string(Arg.getName())] = &Arg;
+  }
+
+  MaybeValue RetVal = GenerateCode(Func.Body);
+  if (!RetVal) {
+    TheFunction->eraseFromParent();
+    return std::unexpected(RetVal.error());
+  }
+
+  Builder->CreateRet(RetVal.value());
+  llvm::verifyFunction(*TheFunction);
+  TheFunction->print(llvm::errs());
+  return TheFunction;
+}
+
 
 ///////////////////////////////////////////////////////////////////////////////
 /// PARSERS
@@ -371,6 +472,7 @@ void Handle(F func, std::string success) {
   auto result = func();
   if (result.has_value()) {
     fprintf(stderr, "Parsed: %s\n", success.c_str());
+    GenerateCode(result.value());
   }
   else {
     fprintf(stderr, "Error: %s\n", result.error().c_str());
