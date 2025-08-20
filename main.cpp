@@ -232,7 +232,7 @@ llvm::Function* GenerateCode(const PrototypeAST& Proto) {
 }
 
 
-MaybeLLVMFunction GenerateCode(const FunctionAST& Func) {
+static MaybeLLVMFunction GenerateCode(const FunctionAST& Func) {
   llvm::Function* TheFunction = TheModule->getFunction(Func.Proto.Name);
 
   if (!TheFunction) {
@@ -481,6 +481,13 @@ void Handle(F func, std::string success) {
 }
 
 int main() {
+  // Open a new context and module.
+  TheContext = std::make_unique<llvm::LLVMContext>();
+  TheModule = std::make_unique<llvm::Module>("my cool jit", *TheContext);
+
+  // Create a new builder for the module.
+  Builder = std::make_unique<llvm::IRBuilder<>>(*TheContext);
+
   getNextToken();
   while (CurTok != tok_eof) {
     switch (CurTok) {
